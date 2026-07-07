@@ -1,0 +1,114 @@
+===
+upload cron job due in 20 seconds to R2
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+# Create a cron job store with a single job scheduled 20s from now
+DUE_MS=$(($(date +%s) * 1000 + 20000))
+CRON_STORE='{"version":1,"jobs":[{"id":"e2e-test-job","enabled":true,"schedule":{"kind":"at","atMs":'"$DUE_MS"'},"state":{}}]}'
+./curl-auth -s -X POST "$WORKER_URL/debug/r2-put?key=openclaw/cron/jobs.json" -d "$CRON_STORE" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.success == true
+
+===
+destroy container to simulate sleep
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+./curl-auth -s -X POST "$WORKER_URL/debug/destroy-container" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.success == true
+
+===
+verify container is down
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+# Poll until no running processes (destroy may take a few seconds)
+for i in $(seq 1 10); do
+    PROCS=$(./curl-auth -s "$WORKER_URL/debug/processes" 2>/dev/null || echo '{"processes":[]}')
+    COUNT=$(echo "$PROCS" | jq '[.processes[] | select(.status == "running")] | length' 2>/dev/null || echo "0")
+    if [ "$COUNT" = "0" ]; then
+        echo "{\"running_processes\": $COUNT}" | jq .
+        exit 0
+    fi
+    sleep 3
+done
+echo "{\"running_processes\": $COUNT}" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.running_processes == 0
+
+===
+trigger cron wake for imminent job
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+# The job is due in ~20s which is within the 10-minute lead window.
+# trigger-cron calls handleScheduled which reads jobs.json from R2,
+# sees the imminent job, and calls ensureGateway to wake the container.
+./curl-auth -s -X POST "$WORKER_URL/debug/trigger-cron" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.success == true
+
+===
+verify gateway woke up after cron trigger
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+for i in $(seq 1 30); do
+    STATUS=$(./curl-auth -s "$WORKER_URL/api/status" 2>/dev/null || echo "")
+    OK=$(echo "$STATUS" | jq -r '.ok // false' 2>/dev/null)
+    if [ "$OK" = "true" ]; then
+        echo "$STATUS" | jq .
+        exit 0
+    fi
+    sleep 5
+done
+echo "$STATUS" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.ok == true
+
+===
+cron handler skips when no jobs are due
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+# Upload a cron store with a job far in the future (1 hour from now)
+FUTURE_MS=$(($(date +%s) * 1000 + 3600000))
+CRON_STORE='{"version":1,"jobs":[{"id":"future-job","enabled":true,"schedule":{"kind":"at","atMs":'"$FUTURE_MS"'},"state":{}}]}'
+./curl-auth -s -X POST "$WORKER_URL/debug/r2-put?key=openclaw/cron/jobs.json" -d "$CRON_STORE" > /dev/null
+
+# Destroy container again
+./curl-auth -s -X POST "$WORKER_URL/debug/destroy-container" > /dev/null
+sleep 5
+
+# Trigger cron — should skip because job is 1h away (outside 10m lead time)
+./curl-auth -s -X POST "$WORKER_URL/debug/trigger-cron" > /dev/null
+
+# Verify gateway is still down (cron didn't wake it).
+# Use debug/processes instead of /api/status (which would restart the gateway).
+sleep 3
+PROCS=$(./curl-auth -s "$WORKER_URL/debug/processes" 2>/dev/null || echo '{"processes":[]}')
+COUNT=$(echo "$PROCS" | jq '[.processes[] | select(.status == "running")] | length' 2>/dev/null || echo "0")
+echo "{\"running_processes\": $COUNT}" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.running_processes == 0
+
+

@@ -1,0 +1,68 @@
+===
+r2 storage status shows configured
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+./curl-auth -s "$WORKER_URL/api/admin/storage" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.configured == true
+
+===
+manual sync succeeds
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+LAST_RESULT=""
+for attempt in 1 2 3; do
+    LAST_RESULT=$(./curl-auth -s -X POST "$WORKER_URL/api/admin/storage/sync")
+    SUCCESS=$(echo "$LAST_RESULT" | jq -r '.success // false' 2>/dev/null)
+    if [ "$SUCCESS" = "true" ]; then
+        break
+    fi
+    sleep 10
+done
+echo "$LAST_RESULT" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.success == true
+
+===
+second sync also succeeds (idempotent)
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+./curl-auth -s -X POST "$WORKER_URL/api/admin/storage/sync" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.success == true
+
+===
+storage status shows last backup id
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+./curl-auth -s "$WORKER_URL/api/admin/storage" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.configured == true
+* result.lastBackupId matches /^[0-9a-f-]+$/
+
+===
+third sync also succeeds
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+./curl-auth -s -X POST "$WORKER_URL/api/admin/storage/sync" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.success == true

@@ -1,0 +1,66 @@
+===
+start moltworker server
+===
+./start-server -v
+---
+{{ s }}
+---
+where
+* strip(s) endswith "ready"
+
+===
+start playwright browser
+===
+./start-browser
+---
+{{ output }}
+---
+where
+* strip(output) endswith "ready"
+
+===
+navigate to main page and wait for worker to be ready
+%require
+===
+TOKEN=$(cat "$CCTR_FIXTURE_DIR/gateway-token.txt")
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+
+# Start a background debug loop that polls /api/status and logs responses.
+# This helps diagnose why the gateway sometimes fails to start in CI.
+(
+  for i in $(seq 1 60); do
+    RESP=$(./curl-auth -s -m 10 "$WORKER_URL/api/status" 2>/dev/null || echo '{"error":"curl failed"}')
+    echo "[debug-poll $i] $(date +%H:%M:%S) $RESP" >&2
+    OK=$(echo "$RESP" | jq -r '.ok // false' 2>/dev/null)
+    if [ "$OK" = "true" ]; then
+      echo "[debug-poll] Gateway is up!" >&2
+      break
+    fi
+    sleep 8
+  done
+) &
+DEBUG_PID=$!
+
+plwr -S moltworker-e2e open "$WORKER_URL/?token=$TOKEN" -T 480000
+
+# Wait for "Pairing required" — this ensures the WS connection has been
+# attempted and the gateway has registered a pending pairing request.
+# If it times out, dump what the browser is actually showing.
+if ! plwr -S moltworker-e2e wait 'text=Pairing required' -T 480000; then
+  echo "[debug] wait for 'Pairing required' timed out. Browser state:" >&2
+  echo "[debug] URL: $(plwr -S moltworker-e2e url -T 5000 2>/dev/null)" >&2
+  echo "[debug] Body text (first 500 chars):" >&2
+  plwr -S moltworker-e2e eval 'document.body?.innerText?.substring(0, 500) || "empty"' -T 5000 >&2 2>/dev/null || true
+  echo "[debug] Console errors:" >&2
+  plwr -S moltworker-e2e console -T 5000 >&2 2>/dev/null || true
+  echo "[debug] Network (fetch):" >&2
+  plwr -S moltworker-e2e network --type fetch -T 5000 >&2 2>/dev/null || true
+
+  # Clean up debug loop
+  kill $DEBUG_PID 2>/dev/null || true
+  exit 1
+fi
+
+# Clean up debug loop
+kill $DEBUG_PID 2>/dev/null || true
+---
