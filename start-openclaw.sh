@@ -3,12 +3,19 @@
 # This script:
 # 1. Runs openclaw onboard --non-interactive to configure from env vars
 # 2. Patches config for features onboard doesn't cover (channels, gateway auth)
-# 3. Starts the gateway
+# 3. Sanitizes stale/invalid keys restored from old R2 backups
+# 4. Starts the gateway
 #
 # NOTE: Persistence (backup/restore) is handled by the Sandbox SDK at the
 # Worker level, not inside the container. The Worker calls createBackup()
 # and restoreBackup() which use squashfs snapshots stored in R2.
 # No rclone or R2 credentials are needed inside the container.
+#
+# Because the config is restored from an R2 snapshot on every boot, any
+# config repair MUST happen here in the patch step (which runs after restore,
+# before the gateway starts). Editing the config via /debug/cli does NOT
+# persist — those writes land in the FUSE upper layer and get wiped by the
+# next restoreIfNeeded / createBackup cycle.
 
 set -e
 
@@ -60,13 +67,14 @@ else
 fi
 
 # ============================================================
-# PATCH CONFIG (channels, gateway auth, trusted proxies)
+# PATCH CONFIG (channels, gateway auth, trusted proxies, provider repair)
 # ============================================================
 # openclaw onboard handles provider/model config, but we need to patch in:
 # - Channel config (Telegram, Discord, Slack)
 # - Gateway token auth
 # - Trusted proxies for sandbox networking
 # - Base URL override for legacy AI Gateway path
+# - MiniMax provider repair (strip stale keys + re-inject key/baseUrl)
 node << 'EOFPATCH'
 const fs = require('fs');
 
@@ -97,11 +105,6 @@ if (process.env.OPENCLAW_GATEWAY_TOKEN) {
 }
 
 // Allow any origin to connect to the gateway control UI.
-// The gateway runs inside a Cloudflare Container behind the Worker, which
-// proxies requests from the public workers.dev domain. Without this,
-// openclaw >= 2026.2.26 rejects WebSocket connections because the browser's
-// origin (https://....workers.dev) doesn't match the gateway's localhost.
-// Security is handled by CF Access + gateway token auth, not origin checks.
 config.gateway.controlUi = config.gateway.controlUi || {};
 config.gateway.controlUi.allowedOrigins = ['*'];
 
@@ -110,17 +113,7 @@ if (process.env.OPENCLAW_DEV_MODE === 'true') {
     config.gateway.controlUi.allowInsecureAuth = true;
 }
 
-// Legacy AI Gateway base URL override:
-// ANTHROPIC_BASE_URL is picked up natively by the Anthropic SDK,
-// so we don't need to patch the provider config. Writing a provider
-// entry without a models array breaks OpenClaw's config validation.
-
 // AI Gateway model override (CF_AI_GATEWAY_MODEL=provider/model-id)
-// Adds a provider entry for any AI Gateway provider and sets it as default model.
-// Examples:
-//   workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast
-//   openai/gpt-4o
-//   anthropic/claude-sonnet-4-5
 if (process.env.CF_AI_GATEWAY_MODEL) {
     const raw = process.env.CF_AI_GATEWAY_MODEL;
     const slashIdx = raw.indexOf('/');
@@ -160,6 +153,55 @@ if (process.env.CF_AI_GATEWAY_MODEL) {
     }
 }
 
+// ============================================================
+// MiniMax provider repair
+// ============================================================
+// Old R2 backups stored a minimax provider block with keys that OpenClaw's
+// strict schema rejects, which crashes the gateway on startup with:
+//   models.providers.minimax.models.0: Unrecognized key: "baseUrl"
+//   models.providers.minimax: Unrecognized keys: "contextWindow","maxTokens","timeoutSeconds"
+// Same class of problem as the Telegram channel fix (#47): stale keys from an
+// old backup fail validation. We strip the invalid keys on every boot, and
+// re-inject apiKey/baseUrl from secrets so credential changes persist too.
+if (config.models && config.models.providers && config.models.providers.minimax) {
+    const mm = config.models.providers.minimax;
+
+    // Strip keys that are invalid at the PROVIDER level
+    delete mm.contextWindow;
+    delete mm.maxTokens;
+    delete mm.timeoutSeconds;
+    // Non-standard flag not in OpenClaw's reference config; can force the
+    // buggy Authorization-header path (see openclaw #29095). Remove it so
+    // OpenClaw uses the x-api-key header that MiniMax accepts.
+    delete mm.authHeader;
+
+    // Strip keys that are invalid at the MODEL level
+    if (Array.isArray(mm.models)) {
+        for (const m of mm.models) {
+            delete m.baseUrl;
+        }
+    }
+
+    // Re-inject credentials from secrets so a rotated key / region change
+    // survives the R2 restore. Set these via `npx wrangler secret put ...`.
+    if (process.env.MINIMAX_API_KEY) {
+        mm.apiKey = process.env.MINIMAX_API_KEY;
+    }
+    // Region-correct base URL:
+    //   International key -> https://api.minimax.io/anthropic
+    //   China key         -> https://api.minimaxi.com/anthropic
+    if (process.env.MINIMAX_BASE_URL) {
+        mm.baseUrl = process.env.MINIMAX_BASE_URL;
+    }
+
+    // Ensure the Anthropic-compatible API type is set
+    mm.api = mm.api || 'anthropic-messages';
+
+    console.log('MiniMax provider repaired (stripped invalid keys' +
+        (process.env.MINIMAX_API_KEY ? ', re-injected apiKey' : '') +
+        (process.env.MINIMAX_BASE_URL ? ', set baseUrl=' + process.env.MINIMAX_BASE_URL : '') + ')');
+}
+
 // Telegram configuration
 // Overwrite entire channel object to drop stale keys from old R2 backups
 // that would fail OpenClaw's strict config validation (see #47)
@@ -178,7 +220,6 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
 }
 
 // Discord configuration
-// Discord uses a nested dm object: dm.policy, dm.allowFrom (per DiscordDmConfig)
 if (process.env.DISCORD_BOT_TOKEN) {
     const dmPolicy = process.env.DISCORD_DM_POLICY || 'pairing';
     const dm = { policy: dmPolicy };
