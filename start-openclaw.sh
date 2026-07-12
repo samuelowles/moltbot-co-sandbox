@@ -197,6 +197,27 @@ if (config.models && config.models.providers && config.models.providers.minimax)
     // Ensure the Anthropic-compatible API type is set
     mm.api = mm.api || 'anthropic-messages';
 
+    // Define the minimax-m3 custom model explicitly so it is always present
+    // and valid, regardless of what an older R2 snapshot restored.
+    mm.models = [{
+        id: 'minimax-m3',
+        name: 'MiniMax M3',
+        reasoning: true,
+        input: ['text'],
+        contextWindow: 1000000,
+        maxTokens: 131072,
+    }];
+
+    // Make MiniMax the ONLY available model:
+    //  - mode "replace" drops OpenClaw's built-in provider catalog
+    //  - the allowlist (agents.defaults.models) contains only minimax-m3
+    //  - primary points at minimax-m3
+    config.models.mode = 'replace';
+    config.agents = config.agents || {};
+    config.agents.defaults = config.agents.defaults || {};
+    config.agents.defaults.model = { primary: 'minimax/minimax-m3' };
+    config.agents.defaults.models = { 'minimax/minimax-m3': {} };
+
     console.log('MiniMax provider repaired (stripped invalid keys' +
         (process.env.MINIMAX_API_KEY ? ', re-injected apiKey' : '') +
         (process.env.MINIMAX_BASE_URL ? ', set baseUrl=' + process.env.MINIMAX_BASE_URL : '') + ')');
