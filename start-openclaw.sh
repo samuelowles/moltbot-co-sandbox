@@ -154,19 +154,22 @@ if (process.env.CF_AI_GATEWAY_MODEL) {
 }
 
 // ============================================================
-// MiniMax provider repair
+// MiniMax provider — define/repair and set as the ONLY model
 // ============================================================
-// Old R2 backups stored a minimax provider block with keys that OpenClaw's
-// strict schema rejects, which crashes the gateway on startup with:
+// This runs UNCONDITIONALLY (as long as MINIMAX_API_KEY is set) so the
+// provider is CREATED even when a fresh onboard or a clean R2 snapshot did
+// not include a minimax block — the previous version only patched an
+// existing block, so a config without minimax silently got no model.
+// It also strips the stale keys that older backups stored, which fail
+// OpenClaw's strict validation:
 //   models.providers.minimax.models.0: Unrecognized key: "baseUrl"
 //   models.providers.minimax: Unrecognized keys: "contextWindow","maxTokens","timeoutSeconds"
-// Same class of problem as the Telegram channel fix (#47): stale keys from an
-// old backup fail validation. We strip the invalid keys on every boot, and
-// re-inject apiKey/baseUrl from secrets so credential changes persist too.
-if (config.models && config.models.providers && config.models.providers.minimax) {
-    const mm = config.models.providers.minimax;
+if (process.env.MINIMAX_API_KEY) {
+    config.models = config.models || {};
+    config.models.providers = config.models.providers || {};
+    const mm = config.models.providers.minimax = config.models.providers.minimax || {};
 
-    // Strip keys that are invalid at the PROVIDER level
+    // Strip keys that are invalid at the PROVIDER level (leftover from old backups)
     delete mm.contextWindow;
     delete mm.maxTokens;
     delete mm.timeoutSeconds;
@@ -175,30 +178,16 @@ if (config.models && config.models.providers && config.models.providers.minimax)
     // OpenClaw uses the x-api-key header that MiniMax accepts.
     delete mm.authHeader;
 
-    // Strip keys that are invalid at the MODEL level
-    if (Array.isArray(mm.models)) {
-        for (const m of mm.models) {
-            delete m.baseUrl;
-        }
-    }
-
-    // Re-inject credentials from secrets so a rotated key / region change
-    // survives the R2 restore. Set these via `npx wrangler secret put ...`.
-    if (process.env.MINIMAX_API_KEY) {
-        mm.apiKey = process.env.MINIMAX_API_KEY;
-    }
+    // Provider-level settings, sourced from secrets so they survive R2 restores.
+    mm.api = 'anthropic-messages';
+    mm.apiKey = process.env.MINIMAX_API_KEY;
     // Region-correct base URL:
     //   International key -> https://api.minimax.io/anthropic
     //   China key         -> https://api.minimaxi.com/anthropic
-    if (process.env.MINIMAX_BASE_URL) {
-        mm.baseUrl = process.env.MINIMAX_BASE_URL;
-    }
+    mm.baseUrl = process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic';
 
-    // Ensure the Anthropic-compatible API type is set
-    mm.api = mm.api || 'anthropic-messages';
-
-    // Define the minimax-m3 custom model explicitly so it is always present
-    // and valid, regardless of what an older R2 snapshot restored.
+    // Custom model definition. Model-level keys ONLY — no baseUrl here
+    // (baseUrl belongs on the provider; on the model it fails validation).
     mm.models = [{
         id: 'minimax-m3',
         name: 'MiniMax M3',
@@ -218,9 +207,9 @@ if (config.models && config.models.providers && config.models.providers.minimax)
     config.agents.defaults.model = { primary: 'minimax/minimax-m3' };
     config.agents.defaults.models = { 'minimax/minimax-m3': {} };
 
-    console.log('MiniMax provider repaired (stripped invalid keys' +
-        (process.env.MINIMAX_API_KEY ? ', re-injected apiKey' : '') +
-        (process.env.MINIMAX_BASE_URL ? ', set baseUrl=' + process.env.MINIMAX_BASE_URL : '') + ')');
+    console.log('MiniMax configured as sole model (minimax/minimax-m3) via ' + mm.baseUrl);
+} else {
+    console.warn('MINIMAX_API_KEY not set — MiniMax provider NOT configured');
 }
 
 // Telegram configuration
