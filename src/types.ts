@@ -19,6 +19,8 @@ export interface OpenClawEnv {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_BASE_URL?: string;
   OPENAI_API_KEY?: string;
+  MINIMAX_API_KEY?: string; // MiniMax API key (Anthropic-compatible endpoint)
+  MINIMAX_BASE_URL?: string; // Optional; defaults to https://api.minimax.io/anthropic (use https://api.minimaxi.com/anthropic for China keys)
   MOLTBOT_GATEWAY_TOKEN?: string; // Gateway token (mapped to OPENCLAW_GATEWAY_TOKEN for container)
   DEV_MODE?: string; // Set to 'true' for local dev (skips CF Access auth + openclaw device pairing)
   E2E_TEST_MODE?: string; // Set to 'true' for E2E tests (skips CF Access auth but keeps device pairing)
