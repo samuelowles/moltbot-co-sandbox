@@ -39,6 +39,13 @@ export function buildEnvVars(env: OpenClawEnv): Record<string, string> {
     envVars.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL;
   }
 
+  // MiniMax (Anthropic-compatible endpoint). start-openclaw.sh reads these
+  // to build/repair the minimax provider inside the container. Without
+  // forwarding them here, process.env.MINIMAX_API_KEY is undefined in the
+  // container and the provider is never configured.
+  if (env.MINIMAX_API_KEY) envVars.MINIMAX_API_KEY = env.MINIMAX_API_KEY;
+  if (env.MINIMAX_BASE_URL) envVars.MINIMAX_BASE_URL = env.MINIMAX_BASE_URL;
+
   // Map MOLTBOT_GATEWAY_TOKEN to OPENCLAW_GATEWAY_TOKEN (container expects this name)
   if (env.MOLTBOT_GATEWAY_TOKEN) envVars.OPENCLAW_GATEWAY_TOKEN = env.MOLTBOT_GATEWAY_TOKEN;
   if (env.DEV_MODE) envVars.OPENCLAW_DEV_MODE = env.DEV_MODE;
